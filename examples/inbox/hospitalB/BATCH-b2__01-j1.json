@@ -1,0 +1,8 @@
+{
+  "resourceType": "ClinicalEvent",
+  "recordId": "j1",
+  "patientId": "P_0-01",
+  "eventType": "discharge",
+  "eventTime": "2026-01-05T11:00:00Z",
+  "gender": "M"
+}

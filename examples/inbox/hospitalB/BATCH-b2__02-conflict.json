@@ -1,0 +1,8 @@
+{
+  "resourceType": "ClinicalEvent",
+  "recordId": "j2",
+  "patientId": "P001",
+  "eventType": "OBSERVATION",
+  "eventTime": "2026-01-06T11:00:00Z",
+  "gender": "F"
+}
