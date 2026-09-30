@@ -181,3 +181,50 @@ func TestLargeInputBounded(t *testing.T) {
 	}
 	t.Logf("processed %d events -> state keys=%d, dedup set=%d", n, len(store.Latest()), store.SeenCount())
 }
+
+func msgWithSystem(sys, id, patient, code, ts, value string) Message {
+	return Message{Source: model.SourceText, SourceSystem: sys,
+		Body: fmt.Sprintf("EVT|%s|%s|observation|%s|%s|%s", id, patient, code, ts, value)}
+}
+
+func TestCrossSourceSameEventIDNotMerged(t *testing.T) {
+	p, store := setup()
+	// 同一事件号 e1，但分别来自 HIS-A 与 HIS-B：属于不同命名空间，必须共存。
+	a := msgWithSystem("HIS-A", "e1", "MRN-1", "HR", "2026-09-01T10:00:00Z", "70")
+	b := msgWithSystem("HIS-B", "e1", "MRN-1", "HR", "2026-09-01T10:00:00Z", "70")
+	if r := p.ProcessBatch(store, []Message{a, b}); !r.Committed {
+		t.Fatal("different-source same-number events should both commit")
+	}
+	if store.SeenCount() != 2 {
+		t.Fatalf("seen=%d, want 2 (source-scoped dedup)", store.SeenCount())
+	}
+	latest := store.Latest()
+	if len(latest) != 2 {
+		t.Fatalf("state keys=%d, want 2 per (source,patient,type,code)", len(latest))
+	}
+	t.Logf("同号事件跨来源共存：seen=%d keys=%d", store.SeenCount(), len(latest))
+
+	// 同来源同号但取值对不上：必须可区分拒绝，整批回滚，不任选其一。
+	conflict := msgWithSystem("HIS-A", "e1", "MRN-1", "HR", "2026-09-01T10:00:00Z", "99")
+	res := p.ProcessBatch(store, []Message{conflict})
+	if !res.RolledBack {
+		t.Fatal("same-source same-id payload mismatch must roll back")
+	}
+	rj := res.Outcomes[0].Quality.Rejection
+	if rj.Reason != model.RejectEventConflict {
+		t.Fatalf("reason=%s want EVENT_CONFLICT", rj.Reason)
+	}
+	t.Logf("同来源同号载荷冲突 -> reason=%s detail=%s", rj.Reason, rj.Detail)
+	if store.SeenCount() != 2 {
+		t.Fatalf("rejected conflict must not change state, seen=%d", store.SeenCount())
+	}
+
+	// 同来源同号且载荷完全一致：幂等，不新增登记。
+	again := msgWithSystem("HIS-A", "e1", "MRN-1", "HR", "2026-09-01T10:00:00Z", "70")
+	if r := p.ProcessBatch(store, []Message{again}); !r.Committed {
+		t.Fatal("identical re-delivery should commit as no-op")
+	}
+	if store.SeenCount() != 2 {
+		t.Fatalf("idempotent re-delivery changed seen=%d", store.SeenCount())
+	}
+}

@@ -15,11 +15,12 @@ const (
 type RejectReason string
 
 const (
-	RejectMissingField      RejectReason = "MISSING_FIELD"       // 必填字段缺失
-	RejectInvalidCode       RejectReason = "INVALID_CODE"        // 编码取值非法
-	RejectStructureMismatch RejectReason = "STRUCTURE_MISMATCH"  // 结构与声明不符
-	RejectIdentityConflict  RejectReason = "IDENTITY_CONFLICT"   // 身份冲突且无法判定
-	RejectMalformed         RejectReason = "MALFORMED"           // 无法解析的输入
+	RejectMissingField      RejectReason = "MISSING_FIELD"      // 必填字段缺失
+	RejectInvalidCode       RejectReason = "INVALID_CODE"       // 编码取值非法
+	RejectStructureMismatch RejectReason = "STRUCTURE_MISMATCH" // 结构与声明不符
+	RejectIdentityConflict  RejectReason = "IDENTITY_CONFLICT"  // 身份冲突且无法判定
+	RejectEventConflict     RejectReason = "EVENT_CONFLICT"     // 同来源同事件号但载荷不一致，无法判定
+	RejectMalformed         RejectReason = "MALFORMED"          // 无法解析的输入
 )
 
 // Rejection 描述一条记录被拒绝的完整判定依据。
@@ -38,19 +39,21 @@ type Quality struct {
 
 // RawRecord 是解析后、归一化前的中间记录。
 type RawRecord struct {
-	Source     SourceType
-	EventID    string
-	PatientID  string // 来源原始患者标识
-	EventType  string
-	Code       string // 观察/事件编码
-	OccurredAt time.Time
-	Value      string
-	Attrs      map[string]string // 额外属性（如出生日期等身份属性）
+	Source       SourceType
+	SourceSystem string // 来源系统标识（投递时给定，记录内自带时以记录为准）
+	EventID      string
+	PatientID    string // 来源原始患者标识
+	EventType    string
+	Code         string // 观察/事件编码
+	OccurredAt   time.Time
+	Value        string
+	Attrs        map[string]string // 额外属性（如出生日期等身份属性）
 }
 
 // NormalizedEvent 是归一化后的统一事件模型。
 type NormalizedEvent struct {
 	EventID        string
+	SourceSystem   string // 去重与冲突判定的来源系统维度
 	CanonicalPID   string // 归并后的规范患者键（内部使用）
 	DeidentifiedID string // 去标识化患者 ID（对外输出）
 	EventType      string

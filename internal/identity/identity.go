@@ -15,6 +15,7 @@ type Registry struct {
 	mu      sync.Mutex
 	byCanon map[string]string            // 规范患者键 -> 去标识化 ID
 	attrs   map[string]map[string]string // 规范患者键 -> 已登记身份属性
+	rawID   map[string]string            // 规范患者键 -> 首次见到的原始患者标识（显式反查用）
 }
 
 // NewRegistry 创建空注册表。
@@ -22,6 +23,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		byCanon: make(map[string]string),
 		attrs:   make(map[string]map[string]string),
+		rawID:   make(map[string]string),
 	}
 }
 

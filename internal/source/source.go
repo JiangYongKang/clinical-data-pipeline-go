@@ -34,6 +34,17 @@ func reject(reason model.RejectReason, field, detail, raw string) *model.Rejecti
 	return &model.Rejection{Reason: reason, Field: field, Detail: detail, RawHint: rawHint(raw)}
 }
 
+// ResolveSystem 决定来源系统：记录自带优先，其次投递级缺省，最后兜底。
+func ResolveSystem(recordSystem, defaultSystem string) string {
+	if s := strings.TrimSpace(recordSystem); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(defaultSystem); s != "" {
+		return s
+	}
+	return DefaultSourceSystem
+}
+
 // validateCommon 校验解析后的公共必填字段与编码合法性。
 func validateCommon(rec *model.RawRecord, raw string) *model.Rejection {
 	if rec.EventID == "" {
@@ -104,6 +115,7 @@ func ParseText(msg string) (model.RawRecord, *model.Rejection) {
 // observationResource 是资源型 JSON 的声明结构。
 type observationResource struct {
 	ResourceType string            `json:"resourceType"`
+	SourceSystem string            `json:"sourceSystem"`
 	ID           string            `json:"id"`
 	Subject      string            `json:"subject"`
 	Code         string            `json:"code"`
@@ -112,10 +124,18 @@ type observationResource struct {
 	Attrs        map[string]string `json:"attrs"`
 }
 
-// ParseJSON 解析资源型 JSON。
-// 声明结构: {"resourceType":"Observation","id":...,"subject":...,"code":...,
-// "effectiveDateTime":...,"value":...,"attrs":{...}}
+// DefaultSourceSystem 是记录与投递都未声明来源系统时的兜底命名空间。
+const DefaultSourceSystem = "local-default"
+
+// ParseJSON 解析资源型 JSON（来源系统缺省取 DefaultSourceSystem）。
 func ParseJSON(data []byte) (model.RawRecord, *model.Rejection) {
+	return ParseJSONWithSystem(data, "")
+}
+
+// ParseJSONWithSystem 解析资源型 JSON。
+// 记录内自带 sourceSystem 时以记录为准，否则用投递级 defaultSystem；
+// 两者都为空时落到 DefaultSourceSystem。
+func ParseJSONWithSystem(data []byte, defaultSystem string) (model.RawRecord, *model.Rejection) {
 	raw := string(data)
 	var res observationResource
 	dec := json.NewDecoder(strings.NewReader(raw))
@@ -129,13 +149,14 @@ func ParseJSON(data []byte) (model.RawRecord, *model.Rejection) {
 			fmt.Sprintf("resourceType %q 不是 Observation", res.ResourceType), raw)
 	}
 	rec := model.RawRecord{
-		Source:    model.SourceJSON,
-		EventID:   res.ID,
-		PatientID: res.Subject,
-		EventType: "observation",
-		Code:      res.Code,
-		Value:     res.Value,
-		Attrs:     res.Attrs,
+		Source:       model.SourceJSON,
+		SourceSystem: ResolveSystem(res.SourceSystem, defaultSystem),
+		EventID:      res.ID,
+		PatientID:    res.Subject,
+		EventType:    "observation",
+		Code:         res.Code,
+		Value:        res.Value,
+		Attrs:        res.Attrs,
 	}
 	if rec.Attrs == nil {
 		rec.Attrs = map[string]string{}
