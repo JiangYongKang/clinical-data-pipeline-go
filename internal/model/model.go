@@ -15,11 +15,12 @@ const (
 type RejectReason string
 
 const (
-	RejectMissingField      RejectReason = "MISSING_FIELD"       // 必填字段缺失
-	RejectInvalidCode       RejectReason = "INVALID_CODE"        // 编码取值非法
-	RejectStructureMismatch RejectReason = "STRUCTURE_MISMATCH"  // 结构与声明不符
-	RejectIdentityConflict  RejectReason = "IDENTITY_CONFLICT"   // 身份冲突且无法判定
-	RejectMalformed         RejectReason = "MALFORMED"           // 无法解析的输入
+	RejectMissingField      RejectReason = "MISSING_FIELD"      // 必填字段缺失
+	RejectInvalidCode       RejectReason = "INVALID_CODE"       // 编码取值非法
+	RejectStructureMismatch RejectReason = "STRUCTURE_MISMATCH" // 结构与声明不符
+	RejectIdentityConflict  RejectReason = "IDENTITY_CONFLICT"  // 身份冲突且无法判定
+	RejectEventConflict     RejectReason = "EVENT_CONFLICT"     // 同来源同号事件内容冲突且无法判定
+	RejectMalformed         RejectReason = "MALFORMED"          // 无法解析的输入
 )
 
 // Rejection 描述一条记录被拒绝的完整判定依据。
@@ -38,29 +39,32 @@ type Quality struct {
 
 // RawRecord 是解析后、归一化前的中间记录。
 type RawRecord struct {
-	Source     SourceType
-	EventID    string
-	PatientID  string // 来源原始患者标识
-	EventType  string
-	Code       string // 观察/事件编码
-	OccurredAt time.Time
-	Value      string
-	Attrs      map[string]string // 额外属性（如出生日期等身份属性）
+	Source       SourceType
+	SourceSystem string // 来源系统标识（事件去重必须连同它一起判定）
+	EventID      string
+	PatientID    string // 来源原始患者标识
+	EventType    string
+	Code         string // 观察/事件编码
+	OccurredAt   time.Time
+	Value        string
+	Attrs        map[string]string // 额外属性（如出生日期等身份属性）
 }
 
 // NormalizedEvent 是归一化后的统一事件模型。
 type NormalizedEvent struct {
-	EventID        string
-	CanonicalPID   string // 归并后的规范患者键（内部使用）
-	DeidentifiedID string // 去标识化患者 ID（对外输出）
-	EventType      string
-	Code           string
-	OccurredAt     time.Time
-	Value          string
+	EventID        string    `json:"eventId"`
+	SourceSystem   string    `json:"sourceSystem"`
+	CanonicalPID   string    `json:"canonicalPid"`   // 归并后的规范患者键（内部使用）
+	DeidentifiedID string    `json:"deidentifiedId"` // 去标识化患者 ID（对外输出）
+	EventType      string    `json:"eventType"`
+	Code           string    `json:"code"`
+	OccurredAt     time.Time `json:"occurredAt"`
+	Value          string    `json:"value"`
 }
 
 // Outcome 是单条记录的处理结论。
 type Outcome struct {
-	Event   *NormalizedEvent // 接受时非空
-	Quality Quality
+	Event     *NormalizedEvent // 接受时非空
+	Quality   Quality
+	Duplicate bool // 命中已提交的同来源同号事件，幂等空操作（仍算接收）
 }
