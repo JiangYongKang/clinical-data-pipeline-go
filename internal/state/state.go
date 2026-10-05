@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/highcumontoa/clinical-data-pipeline-go/internal/identity"
 )
@@ -31,6 +32,35 @@ const (
 	filePerm      = 0o600
 	snapshotVers  = 1
 )
+
+// canonicalTimeLayout 是落盘时间的规范格式：UTC、小数秒固定 9 位（不足补 0、
+// 整秒补 .000000000）。固定宽度让字符串字典序与真实时间序一致，
+// “整秒 / .5 / .50 / .25”等不同写法归一化为同一串，不因写法产生不同结论。
+const canonicalTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// CanonicalTime 把时间格式化为落盘规范串（UTC、9 位小数秒）。
+func CanonicalTime(t time.Time) string {
+	return t.UTC().Format(canonicalTimeLayout)
+}
+
+// parseEventTime 解析 RFC3339（含任意位数小数秒）时间；解析失败返回 false。
+func parseEventTime(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// canonicalizeOccurredAt 把可能由旧版本写入的可变宽度时间串归一化为规范串；
+// 无法解析（不应出现）时原样返回。
+func canonicalizeOccurredAt(s string) string {
+	t, ok := parseEventTime(s)
+	if !ok {
+		return s
+	}
+	return CanonicalTime(t)
+}
 
 // ErrLocked 表示状态目录正被另一个进程以排他方式占用。
 var ErrLocked = errors.New("状态目录已被其他进程锁定")
@@ -59,13 +89,26 @@ func LatestKey(canonicalPID, eventType, code string) string {
 }
 
 // PayloadEqual 判断同去重键的两条事件载荷是否完全一致。
+// 时间按真实时间点比较（不同写法如 .5 与 .500000000 视为同一时刻），
+// 不因小数秒写法不同而误报“同号载荷冲突”。
 // 不一致即“同号但无法判定为同一事件”，调用方必须拒绝而非任选其一。
 func PayloadEqual(a, b Event) bool {
 	return a.CanonicalPID == b.CanonicalPID &&
 		a.EventType == b.EventType &&
 		a.Code == b.Code &&
-		a.OccurredAt == b.OccurredAt &&
+		occurredAtEqual(a.OccurredAt, b.OccurredAt) &&
 		a.Value == b.Value
+}
+
+// occurredAtEqual 按真实时间点判断两个时间串是否同一时刻；
+// 仅在两者都无法解析时退化为字符串比较（正常数据不会走到）。
+func occurredAtEqual(x, y string) bool {
+	tx, ox := parseEventTime(x)
+	ty, oy := parseEventTime(y)
+	if ox && oy {
+		return tx.Equal(ty)
+	}
+	return x == y
 }
 
 // onDisk 是状态文件的磁盘格式。
@@ -152,8 +195,31 @@ func (s *Store) load() error {
 	if s.latest == nil {
 		s.latest = map[string]Event{}
 	}
+	s.migrateSubsecondConclusions()
 	s.reg.Restore(d.Mapping)
 	return nil
+}
+
+// migrateSubsecondConclusions 处理旧版本遗留状态：
+//  1. 把可变宽度时间串（整秒无小数、.5/.50 等）归一化为固定宽度规范串；
+//  2. 旧版本按字符串字典序取舍，同一秒内的小数秒事件可能选错结论，
+//     这里从全部已提交事件按真实时间重算每键最新结论并就地修正。
+//
+// 迁移只改时间写法与“最新结论”指针，seen 事件集合与身份映射不变，
+// 因此重放同一批依旧幂等（不新增身份、不新增事件）。
+func (s *Store) migrateSubsecondConclusions() {
+	for k, ev := range s.seen {
+		ev.OccurredAt = canonicalizeOccurredAt(ev.OccurredAt)
+		s.seen[k] = ev
+	}
+	recomputed := make(map[string]Event, len(s.latest))
+	for _, ev := range s.seen {
+		key := LatestKey(ev.CanonicalPID, ev.EventType, ev.Code)
+		if cur, has := recomputed[key]; !has || eventLess(cur, ev) {
+			recomputed[key] = ev
+		}
+	}
+	s.latest = recomputed
 }
 
 // persist 以“临时文件 + fsync + rename + 目录 fsync”原子写入整份快照。
@@ -273,7 +339,10 @@ func (t *Tx) LatestForKey(key string) (Event, bool) {
 }
 
 // Stage 暂存一条事件：更新去重集合与状态键结论（乱序取舍）。
+// 时间串在此归一化为固定宽度规范串，保证同批/跨批写法不同（整秒、.5、.50）
+// 的同一时刻得到完全一致的落盘表示。
 func (t *Tx) Stage(ev Event) {
+	ev.OccurredAt = canonicalizeOccurredAt(ev.OccurredAt)
 	t.seen[DedupKey(ev.SourceSystem, ev.EventID)] = ev
 	key := LatestKey(ev.CanonicalPID, ev.EventType, ev.Code)
 	if cur, has := t.latest[key]; !has || eventLess(cur, ev) {
@@ -317,9 +386,18 @@ func (t *Tx) Rollback() {
 }
 
 // eventLess 定义乱序取舍：按 (OccurredAt, EventID) 字典序，与到达顺序无关。
+// 时间按真实时间点比较，整秒与小数秒（.5/.50/.25 等任意位数）都落在同一时间轴上，
+// 绝不按字符串字典序（固定宽度规范串的字典序虽与时间序一致，但历史数据可能是
+// 旧版本写入的可变宽度串）。时间完全相同时再按事件号稳定分先后。
 func eventLess(a, b Event) bool {
-	if a.OccurredAt != b.OccurredAt {
-		return a.OccurredAt < b.OccurredAt // RFC3339 UTC 字符串字典序与时间序一致
+	ta, oa := parseEventTime(a.OccurredAt)
+	tb, ob := parseEventTime(b.OccurredAt)
+	if oa && ob {
+		if !ta.Equal(tb) {
+			return ta.Before(tb)
+		}
+	} else if a.OccurredAt != b.OccurredAt {
+		return a.OccurredAt < b.OccurredAt // 无法解析时的兜底（正常数据不会走到）
 	}
 	return a.EventID < b.EventID
 }

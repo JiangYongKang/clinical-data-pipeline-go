@@ -145,7 +145,7 @@ func runIngest(st *state.Store, dir string) error {
 			if o.Quality.Accepted {
 				fmt.Printf("  [%d] ACCEPT system=%s event=%s deid=%s code=%s at=%s value=%s\n",
 					i, o.Event.SourceSystem, o.Event.EventID, o.Event.DeidentifiedID, o.Event.Code,
-					o.Event.OccurredAt.Format("2006-01-02T15:04:05Z"), o.Event.Value)
+					o.Event.OccurredAt.Format("2006-01-02T15:04:05.999999999Z07:00"), o.Event.Value)
 			} else {
 				r := o.Quality.Rejection
 				fmt.Printf("  [%d] REJECT reason=%s field=%s detail=%s raw=%q\n",

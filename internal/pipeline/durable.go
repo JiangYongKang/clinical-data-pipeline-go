@@ -71,7 +71,7 @@ func Durable(st *state.Store, msgs []Message) DurableResult {
 			DeidentifiedID: deid,
 			EventType:      rec.EventType,
 			Code:           rec.Code,
-			OccurredAt:     rec.OccurredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+			OccurredAt:     state.CanonicalTime(rec.OccurredAt.UTC()),
 			Value:          rec.Value,
 		}
 		// 来源感知去重 + 同号载荷冲突（已提交 + 本批暂存统一判定）。
