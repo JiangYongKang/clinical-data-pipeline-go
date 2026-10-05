@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/highcumontoa/clinical-data-pipeline-go/internal/identity"
 )
@@ -145,15 +146,49 @@ func (s *Store) load() error {
 		return fmt.Errorf("状态文件版本 %d 不受支持（期望 %d）", d.Version, snapshotVers)
 	}
 	s.seen = d.Seen
-	s.latest = d.Latest
 	if s.seen == nil {
 		s.seen = map[string]Event{}
 	}
-	if s.latest == nil {
-		s.latest = map[string]Event{}
+	oldLatest := d.Latest
+	if oldLatest == nil {
+		oldLatest = map[string]Event{}
 	}
+	s.rebuildLatest()
 	s.reg.Restore(d.Mapping)
+	// 历史版本曾按字符串字典序比较时间，可能把小数秒更早的事件写成“最新”。
+	// 打开时用正确规则从去重集合重算结论；若磁盘上的结论需要修正，则原子回写，
+	// 使跨进程重启、后续重放读到的都是正确结论（seen/映射不变，重放仍幂等）。
+	if !latestEqual(oldLatest, s.latest) {
+		return s.persist(s.seen, s.latest, s.reg.Snapshot())
+	}
 	return nil
+}
+
+// latestEqual 比较两份最新结论是否逐键一致。
+func latestEqual(a, b map[string]Event) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// rebuildLatest 按正确的乱序取舍规则（真实时刻含小数秒，时刻相同按事件号）
+// 从已提交去重集合重算每个状态键的最新结论。结果只取决于 seen 的内容，
+// 与到达顺序、批次切分无关，因此与“从头一次性导入全部事件”的结论恒一致。
+func (s *Store) rebuildLatest() {
+	latest := make(map[string]Event)
+	for _, ev := range s.seen {
+		key := LatestKey(ev.CanonicalPID, ev.EventType, ev.Code)
+		if cur, has := latest[key]; !has || eventLess(cur, ev) {
+			latest[key] = ev
+		}
+	}
+	s.latest = latest
 }
 
 // persist 以“临时文件 + fsync + rename + 目录 fsync”原子写入整份快照。
@@ -316,10 +351,30 @@ func (t *Tx) Rollback() {
 	t.store.mu.Unlock()
 }
 
-// eventLess 定义乱序取舍：按 (OccurredAt, EventID) 字典序，与到达顺序无关。
+// eventTime 解析事件落盘时间（RFC3339，UTC，可含小数秒）。
+// 解析失败时 ok=false，调用方退回字符串序兜底，保证比较总有全序。
+func eventTime(ev Event) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339Nano, ev.OccurredAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// eventLess 定义乱序取舍：先按真实时刻（含小数秒）比较，时刻相同再按事件号。
+// 不能用 RFC3339 字符串字典序代替时间序：同一秒内无小数秒（以 'Z' 结尾）与
+// 带小数秒（'.' 0x2E < 'Z' 0x5A）、以及小数位前缀关系（如 ".1Z" 与 ".15Z"）
+// 都会让字符串序与真实时间序相反，从而留下更早的事件。
 func eventLess(a, b Event) bool {
-	if a.OccurredAt != b.OccurredAt {
-		return a.OccurredAt < b.OccurredAt // RFC3339 UTC 字符串字典序与时间序一致
+	ta, oka := eventTime(a)
+	tb, okb := eventTime(b)
+	if oka && okb {
+		if !ta.Equal(tb) {
+			return ta.Before(tb)
+		}
+	} else if a.OccurredAt != b.OccurredAt {
+		// 仅在时间无法解析时退回字符串序（合法管线不会走到这里）。
+		return a.OccurredAt < b.OccurredAt
 	}
 	return a.EventID < b.EventID
 }

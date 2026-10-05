@@ -5,7 +5,8 @@
 //     修复后重放与一次性成功结果一致。
 //  2. 去重：按 EventID 去重，首次投递生效，重复投递为幂等空操作。
 //  3. 乱序取舍：同一状态键 (患者, 事件类型, 编码) 下，
-//     按 (OccurredAt, EventID) 字典序取最大者，与到达顺序无关。
+//     按真实时刻 OccurredAt（含小数秒）比较，时刻相同再按 EventID，
+//     取最大者，与到达顺序无关。
 //  4. 资源有界：仅保存去重集合与每个状态键的最新事件，无无界缓冲。
 package pipeline
 
@@ -230,7 +231,7 @@ func markCommitConflict(outs []model.Outcome) []model.Outcome {
 	return outs
 }
 
-// less 定义乱序取舍规则：按 (OccurredAt, EventID) 字典序。
+// less 定义乱序取舍规则：先按真实时刻（含小数秒），时刻相同再按事件号。
 func less(a, b model.NormalizedEvent) bool {
 	if !a.OccurredAt.Equal(b.OccurredAt) {
 		return a.OccurredAt.Before(b.OccurredAt)
